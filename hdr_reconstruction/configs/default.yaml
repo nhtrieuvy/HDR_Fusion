@@ -1,0 +1,75 @@
+input:
+  min_images: 2
+  recommended_min_images: 3
+  recommended_max_images: 7
+  warn_if_more_than: 9
+
+raw:
+  use_camera_wb: true
+  apply_black_level_correction: true
+  apply_white_level_normalization: true
+  demosaic: true
+  output_color_space: "linear_rgb"
+  apply_gamma_for_linear: false
+  create_rendered_ldr_for_classical_hdr: false
+  rendered_ldr_bit_depth: 8
+  denoise: false
+  sharpen: false
+  lens_correction: false
+
+alignment:
+  enabled: true
+  reference: "middle_exposure"
+  method_linear: "ecc_or_feature"
+  method_raw_domain: "proxy_ecc_warped_mosaic"
+  method_classical: "align_mtb"
+
+hdr:
+  algorithms:
+    - "linear_rgb_merge"
+    - "weighted_linear_rgb_merge"
+    - "noise_aware_weighted_linear_hdr_merge"
+    - "raw_domain_weighted_hdr_merge"
+  output_format: "hdr"
+
+weighted_merge:
+  low_threshold: 0.01
+  high_threshold: 0.98
+  epsilon: 1.0e-8
+  weight_mode: "triangular_luminance"
+
+noise_aware_weighted_merge:
+  low_threshold: 0.01
+  high_threshold: 0.98
+  epsilon: 1.0e-8
+  weight_mode: "triangular_luminance_inverse_noise_variance"
+  read_noise_base: 0.003
+  iso_reference: 100.0
+  read_noise_iso_exponent: 0.5
+  shot_noise_factor: 1.0
+  signal_floor: 1.0e-4
+  max_weight: 1.0e6
+
+raw_domain_weighted_merge:
+  low_threshold: 0.01
+  high_threshold: 0.98
+  epsilon: 1.0e-8
+  weight_mode: "triangular_mosaic_intensity"
+  demosaic_after_merge: "bilinear_float"
+
+tonemapping:
+  method: "aces_filmic"
+  exposure: 1.0
+  gamma: 2.2
+  percentile_normalization: true
+  percentile_black: 0.1
+  percentile_white: 99.7
+  preserve_color: true
+  reinhard_white: 4.0
+
+debug:
+  save_logs: true
+  save_contact_sheet: true
+  save_intermediate_preview: true
+  continue_on_scene_error: true
+  continue_on_algorithm_error: true
