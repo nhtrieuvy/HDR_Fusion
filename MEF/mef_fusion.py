@@ -87,7 +87,7 @@ for scene_name in scenes:
     fusion = merge.process(imgs)
 
     # =========================
-    # REMOVE NEGATIVE VALUES
+    # REMOVE NEGATIVE
     # =========================
 
     fusion = np.clip(
@@ -97,12 +97,24 @@ for scene_name in scenes:
     )
 
     # =========================
-    # GAMMA CORRECTION
+    # NORMALIZE
+    # =========================
+
+    fusion = cv2.normalize(
+        fusion,
+        None,
+        0,
+        1,
+        cv2.NORM_MINMAX
+    )
+
+    # =========================
+    # GAMMA
     # =========================
 
     fusion = np.power(
         fusion,
-        0.7
+        0.95
     )
 
     # =========================
@@ -110,8 +122,8 @@ for scene_name in scenes:
     # =========================
 
     fusion_8bit = (
-        fusion * 255.0
-    ).round().astype(np.uint8)
+        fusion * 255
+    ).astype(np.uint8)
 
     # =========================
     # SAVE OUTPUT
