@@ -1,1 +1,5 @@
+__pycache__/
+*.py[cod]
+
 hdr_reconstruction/input/
+hdr_reconstruction/output/

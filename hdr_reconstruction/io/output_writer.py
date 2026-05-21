@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -36,6 +37,7 @@ def write_algorithm_outputs(
 ) -> HDRResult:
     algorithm_dir = output_root / scene_data.name / result.algorithm_name
     algorithm_dir.mkdir(parents=True, exist_ok=True)
+    write_start = perf_counter()
     hdr_path = algorithm_dir / "hdr.hdr"
     preview_path = algorithm_dir / "preview.png"
     response_path = algorithm_dir / "response_curve.npy"
@@ -54,6 +56,7 @@ def write_algorithm_outputs(
         np.save(response_path, result.response_curve)
         result.metadata["response_curve_path"] = str(response_path)
 
+    result.metadata["output_write_seconds"] = perf_counter() - write_start
     log_payload = build_algorithm_log(scene_data, result)
     write_json(algorithm_dir / "log.json", log_payload)
     return result
@@ -97,6 +100,7 @@ def write_scene_summary(output_root: Path, scene_data: SceneData, results: list[
         algorithms[result.algorithm_name] = {
             "status": result.status,
             "runtime_seconds": result.runtime_seconds,
+            "output_write_seconds": result.metadata.get("output_write_seconds"),
             "hdr_statistics": {
                 key: result.metadata.get(key)
                 for key in (
@@ -123,6 +127,7 @@ def write_scene_summary(output_root: Path, scene_data: SceneData, results: list[
         "warnings": scene_data.warnings,
         "errors": scene_data.errors,
         "alignment_info": scene_data.alignment_info,
+        "processing_info": scene_data.processing_info,
     }
     write_json(output_root / scene_data.name / "summary.json", summary)
 

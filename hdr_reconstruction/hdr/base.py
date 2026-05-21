@@ -48,6 +48,7 @@ class SceneData:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     alignment_info: dict[str, Any] = field(default_factory=dict)
+    processing_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def input_files(self) -> list[str]:

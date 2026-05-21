@@ -32,6 +32,11 @@ hdr:
     - "raw_domain_weighted_hdr_merge"
   output_format: "hdr"
 
+linear_merge:
+  low_threshold: 0.001
+  high_threshold: 0.995
+  epsilon: 1.0e-8
+
 weighted_merge:
   low_threshold: 0.01
   high_threshold: 0.98
@@ -56,6 +61,28 @@ raw_domain_weighted_merge:
   epsilon: 1.0e-8
   weight_mode: "triangular_mosaic_intensity"
   demosaic_after_merge: "bilinear_float"
+  color_correction: "reference_fit"
+  color_fit_max_samples: 50000
+  color_fit_luma_low: 0.02
+  color_fit_luma_high: 0.90
+  color_fit_ridge: 1.0e-4
+  highlight_chroma_repair:
+    enabled: true
+    luminance_percentile: 99.75
+    saturation_threshold: 0.18
+    blend_strength: 0.95
+    min_blend: 0.70
+    target_saturation_limit: 0.08
+    linear_weight_low: 0.01
+    linear_weight_high: 0.98
+  shadow_chroma_repair:
+    enabled: true
+    luminance_percentile: 8.0
+    saturation_threshold: 0.45
+    blend_strength: 0.55
+    target_saturation_limit: 0.30
+    linear_weight_low: 0.01
+    linear_weight_high: 0.98
 
 tonemapping:
   method: "aces_filmic"
@@ -66,10 +93,11 @@ tonemapping:
   percentile_white: 99.7
   preserve_color: true
   reinhard_white: 4.0
+  shadow_lift: 0.03
 
 debug:
   save_logs: true
   save_contact_sheet: true
-  save_intermediate_preview: true
+  save_intermediate_preview: false
   continue_on_scene_error: true
   continue_on_algorithm_error: true

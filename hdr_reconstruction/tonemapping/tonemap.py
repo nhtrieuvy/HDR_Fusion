@@ -35,6 +35,7 @@ def tone_map_with_metadata(
     percentile_white = float(tonemap_config.get("percentile_white", 99.7))
     preserve_color = bool(tonemap_config.get("preserve_color", True))
     reinhard_white = float(tonemap_config.get("reinhard_white", 4.0))
+    shadow_lift = float(tonemap_config.get("shadow_lift", 0.0))
 
     has_nan = bool(np.isnan(hdr).any())
     has_inf = bool(np.isinf(hdr).any())
@@ -46,6 +47,7 @@ def tone_map_with_metadata(
         enabled=percentile_enabled,
         percentile_black=percentile_black,
         percentile_white=percentile_white,
+        preserve_color=preserve_color,
     )
 
     if preserve_color:
@@ -54,6 +56,8 @@ def tone_map_with_metadata(
         mapped_linear = _apply_operator(normalized, method, reinhard_white)
 
     mapped_linear = np.clip(np.nan_to_num(mapped_linear, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    if shadow_lift > 0:
+        mapped_linear = _lift_shadows(mapped_linear, shadow_lift)
     gamma_corrected = np.power(mapped_linear, 1.0 / max(gamma, 1e-8))
     image = (np.clip(gamma_corrected, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
@@ -65,6 +69,7 @@ def tone_map_with_metadata(
         "percentile_black": percentile_black,
         "percentile_white": percentile_white,
         "preserve_color": preserve_color,
+        "shadow_lift": shadow_lift,
         "has_nan": has_nan,
         "has_inf": has_inf,
         **norm_info,
@@ -77,6 +82,7 @@ def _percentile_normalize(
     enabled: bool,
     percentile_black: float,
     percentile_white: float,
+    preserve_color: bool,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if not enabled or not np.any(hdr > 0):
         return hdr, {
@@ -96,7 +102,12 @@ def _percentile_normalize(
     white = float(np.percentile(samples, np.clip(percentile_white, 0.0, 100.0)))
     if white <= black:
         white = black + 1e-8
-    normalized = np.maximum((hdr - black) / (white - black), 0.0)
+    if preserve_color and hdr.ndim == 3:
+        y_norm = np.maximum((luminance - black) / (white - black), 0.0)
+        scale = y_norm / np.maximum(luminance, 1e-8)
+        normalized = hdr * scale[..., None]
+    else:
+        normalized = np.maximum((hdr - black) / (white - black), 0.0)
     return normalized.astype(np.float32), {
         "normalization_black_value": black,
         "normalization_white_value": white,
@@ -129,6 +140,12 @@ def _aces_filmic(values: np.ndarray) -> np.ndarray:
     d = 0.59
     e = 0.14
     return (values * (a * values + b)) / (values * (c * values + d) + e)
+
+
+def _lift_shadows(values: np.ndarray, amount: float) -> np.ndarray:
+    strength = np.clip(amount, 0.0, 0.25)
+    lift = np.sqrt(np.clip(values, 0.0, 1.0)) - values
+    return np.clip(values + strength * lift, 0.0, 1.0)
 
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:

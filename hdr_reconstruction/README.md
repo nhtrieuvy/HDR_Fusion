@@ -78,6 +78,8 @@ python main.py ^
 
 The exposure override argument is optional.
 
+For implementation rules and future-agent guardrails, see `AI_SYSTEM_DESIGN.md`.
+
 ## Output Structure
 
 ```text
@@ -160,7 +162,7 @@ This algorithm merges before RGB demosaicing. Each RAW mosaic is black-level cor
 R_raw(x) = sum_i(w_i(x) * raw_i(x) / t_i) / sum_i(w_i(x))
 ```
 
-The merged RAW radiance mosaic is then demosaiced with a simple float bilinear CFA interpolator and camera white-balance gains. This keeps the merge itself in the RAW/sensor domain, while still producing an RGB `.hdr` radiance map for output and comparison.
+The merged RAW radiance mosaic is then unpacked or demosaiced, white-balanced, and color-corrected into the same linear sRGB space used by the linear RGB algorithms. This keeps the merge itself in the RAW/sensor domain, while still producing an RGB `.hdr` radiance map for output and comparison.
 
 ## Validation
 
@@ -190,4 +192,4 @@ If alignment fails, the pipeline logs a warning and continues with the unaligned
 - Assumes a static scene and mostly fixed viewpoint.
 - Assumes same camera, resolution, ISO, aperture, white balance, focus, and focal length inside a scene.
 - RAW format support depends on the installed LibRaw/rawpy version.
-- RAW-domain output uses a first-pass bilinear demosaic after HDR merge. A future version can replace this with a higher-quality demosaic/color pipeline.
+- RAW-domain output uses a first-pass unpack/bilinear demosaic plus reference-frame color correction after HDR merge. A future version can replace this with a higher-quality calibrated camera color pipeline.

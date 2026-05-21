@@ -4,8 +4,14 @@ import cv2
 import numpy as np
 
 from hdr_reconstruction.hdr.base import HDRResult, SceneData
-from hdr_reconstruction.tonemapping.tonemap import tone_map_with_metadata
-from hdr_reconstruction.utils.image_utils import hdr_statistics, sanitize_float_image
+from hdr_reconstruction.hdr.merge_utils import (
+    finalize_hdr_result,
+    finalize_weighted_average,
+    init_accumulators,
+    luminance,
+    triangular_weights,
+)
+from hdr_reconstruction.utils.image_utils import sanitize_float_image
 from hdr_reconstruction.utils.timer import timed
 
 
@@ -20,42 +26,53 @@ class RawDomainWeightedHDRMerge:
         eps = float(merge_config.get("epsilon", 1e-8))
 
         with timed() as timer:
-            stack = np.stack([sanitize_float_image(frame.raw_mosaic) for frame in scene_data.frames], axis=0)
-            times_shape = (scene_data.exposure_times.shape[0],) + (1,) * (stack.ndim - 1)
-            times = scene_data.exposure_times.astype(np.float32).reshape(times_shape)
-            radiance_stack = stack / np.maximum(times, 1e-12)
-            weights = _triangular_weights(stack, low, high)
+            shape = scene_data.frames[0].raw_mosaic.shape
+            numerator, denominator, fallback_sum = init_accumulators(shape)
+            weight_min = np.inf
+            weight_max = 0.0
+            weight_sum_total = 0.0
+            weight_count = 0
 
-            weighted_sum = np.sum(weights * radiance_stack, axis=0)
-            weight_sum = np.sum(weights, axis=0)
-            fallback = np.mean(radiance_stack, axis=0)
-            raw_radiance = np.where(weight_sum > eps, weighted_sum / np.maximum(weight_sum, eps), fallback)
+            for frame, exposure_time in zip(scene_data.frames, scene_data.exposure_times):
+                raw = sanitize_float_image(frame.raw_mosaic)
+                radiance = raw / max(float(exposure_time), 1e-12)
+                weights = triangular_weights(raw, low, high)
+                numerator += weights * radiance
+                denominator += weights
+                fallback_sum += radiance
+                weight_min = min(weight_min, float(np.min(weights)))
+                weight_max = max(weight_max, float(np.max(weights)))
+                weight_sum_total += float(np.sum(weights))
+                weight_count += int(weights.size)
+
+            raw_radiance = finalize_weighted_average(numerator, denominator, fallback_sum, len(scene_data.frames), eps)
             raw_radiance = sanitize_float_image(raw_radiance).astype(np.float32)
 
             cfa_pattern = scene_data.frames[0].cfa_pattern or ("R", "G", "G", "B")
             wb_gains = _white_balance_gains(scene_data)
             camera_rgb_hdr = _raw_radiance_to_rgb(raw_radiance, cfa_pattern, wb_gains)
-            color_matrix, color_info = _estimate_scene_color_correction(scene_data, cfa_pattern, wb_gains)
+            color_matrix, color_info = _estimate_scene_color_correction(scene_data, cfa_pattern, wb_gains, merge_config)
             hdr = _apply_color_matrix(camera_rgb_hdr, color_matrix)
+            hdr, highlight_info = _repair_highlight_chroma(hdr, scene_data, merge_config)
+            hdr, shadow_info = _repair_shadow_chroma(hdr, scene_data, merge_config)
             hdr = sanitize_float_image(hdr).astype(np.float32)
 
-            result.hdr_radiance_map = hdr
-            preview = tone_map_with_metadata(hdr, config)
-            result.preview_png = preview.image
-            result.metadata.update(hdr_statistics(hdr))
-            result.metadata["tone_mapping"] = preview.metadata
+            finalize_hdr_result(result, hdr, config)
             result.metadata.update(
                 {
+                    "merge_mode": "streaming_raw_domain_weighted_average",
                     "raw_domain": True,
                     "raw_merge_domain": "black_corrected_white_normalized_mosaic",
                     "raw_demosaic": "bilinear_float_after_hdr_merge" if raw_radiance.ndim == 2 else "packed_raw_planes_to_rgb",
                     "raw_color_space": "linear_srgb_after_scene_color_correction",
                     "raw_color_correction": color_info,
+                    "raw_highlight_chroma_repair": highlight_info,
+                    "raw_shadow_chroma_repair": shadow_info,
                     "cfa_pattern": list(cfa_pattern),
-                    "weight_min": float(np.min(weights)),
-                    "weight_max": float(np.max(weights)),
-                    "weight_mean": float(np.mean(weights)),
-                    "zero_weight_ratio": float(np.mean(weight_sum <= eps)),
+                    "weight_min": 0.0 if not np.isfinite(weight_min) else weight_min,
+                    "weight_max": weight_max,
+                    "weight_mean": weight_sum_total / max(weight_count, 1),
+                    "zero_weight_ratio": float(np.mean(denominator <= eps)),
                     "raw_radiance_min": float(np.min(raw_radiance)),
                     "raw_radiance_max": float(np.max(raw_radiance)),
                     "raw_radiance_mean": float(np.mean(raw_radiance)),
@@ -63,17 +80,6 @@ class RawDomainWeightedHDRMerge:
             )
         result.runtime_seconds = timer.elapsed
         return result
-
-
-def _triangular_weights(values: np.ndarray, low: float, high: float) -> np.ndarray:
-    clipped = np.clip(values, 0.0, 1.0)
-    midpoint = 0.5 * (low + high)
-    weights = np.zeros_like(clipped, dtype=np.float32)
-    rising = (clipped >= low) & (clipped <= midpoint)
-    falling = (clipped > midpoint) & (clipped <= high)
-    weights[rising] = (clipped[rising] - low) / max(midpoint - low, 1e-8)
-    weights[falling] = (high - clipped[falling]) / max(high - midpoint, 1e-8)
-    return np.clip(weights, 0.0, 1.0)
 
 
 def _white_balance_gains(scene_data: SceneData) -> dict[str, float]:
@@ -133,13 +139,24 @@ def _estimate_scene_color_correction(
     scene_data: SceneData,
     cfa_pattern: tuple[str, ...],
     wb_gains: dict[str, float],
+    merge_config: dict,
 ) -> tuple[np.ndarray, dict]:
+    method = str(merge_config.get("color_correction", "reference_fit")).lower()
+    if method == "identity":
+        return np.eye(3, dtype=np.float32), {"status": "identity_configured"}
+
     ref_idx = int(scene_data.alignment_info.get("reference_index", len(scene_data.frames) // 2))
     ref_frame = scene_data.frames[ref_idx]
     source = _raw_radiance_to_rgb(ref_frame.raw_mosaic, cfa_pattern, wb_gains)
     target = sanitize_float_image(ref_frame.linear_rgb)
 
-    source_samples, target_samples = _sample_color_fit_pixels(source, target)
+    source_samples, target_samples = _sample_color_fit_pixels(
+        source,
+        target,
+        max_samples=int(merge_config.get("color_fit_max_samples", 50000)),
+        luma_low=float(merge_config.get("color_fit_luma_low", 0.02)),
+        luma_high=float(merge_config.get("color_fit_luma_high", 0.90)),
+    )
     if source_samples.shape[0] < 256:
         return np.eye(3, dtype=np.float32), {
             "status": "identity_insufficient_samples",
@@ -147,25 +164,39 @@ def _estimate_scene_color_correction(
             "sample_count": int(source_samples.shape[0]),
         }
 
-    matrix, *_ = np.linalg.lstsq(source_samples, target_samples, rcond=None)
+    ridge = float(merge_config.get("color_fit_ridge", 1e-4))
+    matrix = _ridge_fit_matrix(source_samples, target_samples, ridge)
     matrix = matrix.astype(np.float32)
     return matrix, {
-        "status": "least_squares_fit_to_rawpy_linear_srgb",
+        "status": "ridge_fit_to_rawpy_linear_srgb",
         "reference_file": ref_frame.metadata.filename,
         "sample_count": int(source_samples.shape[0]),
+        "ridge": ridge,
         "matrix": matrix.tolist(),
     }
 
 
-def _sample_color_fit_pixels(source: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _sample_color_fit_pixels(
+    source: np.ndarray,
+    target: np.ndarray,
+    max_samples: int,
+    luma_low: float,
+    luma_high: float,
+) -> tuple[np.ndarray, np.ndarray]:
     source = sanitize_float_image(source)
     target = sanitize_float_image(target)
-    luminance = 0.2126 * target[..., 0] + 0.7152 * target[..., 1] + 0.0722 * target[..., 2]
+    h, w = target.shape[:2]
+    stride = max(1, int(np.sqrt(max(h * w / max(max_samples, 1), 1))))
+    source = source[::stride, ::stride]
+    target = target[::stride, ::stride]
+    target_luminance = 0.2126 * target[..., 0] + 0.7152 * target[..., 1] + 0.0722 * target[..., 2]
+    source_luminance = 0.2126 * source[..., 0] + 0.7152 * source[..., 1] + 0.0722 * source[..., 2]
     mask = (
         np.isfinite(source).all(axis=-1)
         & np.isfinite(target).all(axis=-1)
-        & (luminance > 0.02)
-        & (luminance < 0.90)
+        & (target_luminance > luma_low)
+        & (target_luminance < luma_high)
+        & (source_luminance > 1e-6)
         & (np.max(source, axis=-1) > 1e-6)
         & (np.max(source, axis=-1) < 0.98)
     )
@@ -173,17 +204,215 @@ def _sample_color_fit_pixels(source: np.ndarray, target: np.ndarray) -> tuple[np
     if ys.size == 0:
         return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
 
-    max_samples = 200000
-    stride = max(1, ys.size // max_samples)
-    ys = ys[::stride]
-    xs = xs[::stride]
+    if ys.size > max_samples:
+        sample_stride = max(1, ys.size // max_samples)
+        ys = ys[::sample_stride]
+        xs = xs[::sample_stride]
     return source[ys, xs].reshape(-1, 3), target[ys, xs].reshape(-1, 3)
+
+
+def _ridge_fit_matrix(source_samples: np.ndarray, target_samples: np.ndarray, ridge: float) -> np.ndarray:
+    xtx = source_samples.T @ source_samples
+    xty = source_samples.T @ target_samples
+    xtx += np.eye(3, dtype=np.float32) * max(ridge, 0.0)
+    try:
+        return np.linalg.solve(xtx, xty)
+    except np.linalg.LinAlgError:
+        matrix, *_ = np.linalg.lstsq(source_samples, target_samples, rcond=None)
+        return matrix
 
 
 def _apply_color_matrix(image: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     converted = image.reshape(-1, 3) @ matrix
     converted = converted.reshape(image.shape)
     return np.maximum(converted, 0.0).astype(np.float32)
+
+
+def _repair_highlight_chroma(
+    hdr: np.ndarray,
+    scene_data: SceneData,
+    merge_config: dict,
+) -> tuple[np.ndarray, dict]:
+    repair_config = merge_config.get("highlight_chroma_repair", {})
+    if isinstance(repair_config, bool):
+        enabled = repair_config
+        repair_config = {}
+    else:
+        enabled = bool(repair_config.get("enabled", True))
+    if not enabled:
+        return hdr, {"enabled": False, "status": "disabled"}
+
+    y = luminance(hdr)
+    max_channel = np.max(hdr, axis=-1)
+    positive = y[np.isfinite(y) & (y > 0)]
+    positive_channel = max_channel[np.isfinite(max_channel) & (max_channel > 0)]
+    if positive.size == 0 or positive_channel.size == 0:
+        return hdr, {"enabled": True, "status": "skipped_no_positive_luminance"}
+
+    percentile = float(repair_config.get("luminance_percentile", 99.75))
+    saturation_threshold = float(repair_config.get("saturation_threshold", 0.18))
+    blend_strength = float(repair_config.get("blend_strength", 0.85))
+    target_saturation_limit = float(repair_config.get("target_saturation_limit", 0.12))
+    min_blend = float(repair_config.get("min_blend", 0.70))
+    low = float(repair_config.get("linear_weight_low", 0.01))
+    high = float(repair_config.get("linear_weight_high", 0.98))
+
+    threshold = float(np.percentile(positive, np.clip(percentile, 0.0, 100.0)))
+    channel_threshold = float(np.percentile(positive_channel, np.clip(percentile, 0.0, 100.0)))
+    y_scale = np.clip((y - threshold) / max(float(np.percentile(positive, 99.95)) - threshold, 1e-8), 0.0, 1.0)
+    channel_scale = np.clip(
+        (max_channel - channel_threshold)
+        / max(float(np.percentile(positive_channel, 99.95)) - channel_threshold, 1e-8),
+        0.0,
+        1.0,
+    )
+    highlight_scale = np.maximum(y_scale, channel_scale)
+    high_mask = (y >= threshold) | (max_channel >= channel_threshold)
+    mask = np.zeros(y.shape, dtype=bool)
+    high_y, high_x = np.nonzero(high_mask)
+    if high_y.size:
+        high_saturation = _rgb_saturation(hdr[high_y, high_x])
+        selected = high_saturation >= saturation_threshold
+        mask[high_y[selected], high_x[selected]] = True
+    if not np.any(mask):
+        return hdr, {
+            "enabled": True,
+            "status": "skipped_no_highlight_chroma_outliers",
+            "luminance_percentile": percentile,
+            "luminance_threshold": threshold,
+            "max_channel_threshold": channel_threshold,
+            "saturation_threshold": saturation_threshold,
+        }
+
+    reference = _best_linear_reference_radiance_for_mask(scene_data, mask, low, high)
+    reference_y = luminance(reference)
+    y_mask = y[mask]
+    repaired = y_mask[:, None] * reference / np.maximum(reference_y[:, None], 1e-8)
+
+    # If all linear references are saturated/invalid, fall back to neutral luminance.
+    invalid_reference = reference_y <= 1e-8
+    if np.any(invalid_reference):
+        repaired[invalid_reference] = y_mask[invalid_reference, None]
+    repaired = _limit_highlight_saturation(repaired, y_mask, target_saturation_limit)
+
+    alpha = blend_strength * np.maximum(highlight_scale[mask], min_blend)
+    output = hdr.copy()
+    output[mask] = hdr[mask] * (1.0 - alpha[:, None]) + repaired * alpha[:, None]
+    return np.maximum(output, 0.0).astype(np.float32), {
+        "enabled": True,
+        "status": "applied",
+        "luminance_percentile": percentile,
+        "luminance_threshold": threshold,
+        "max_channel_threshold": channel_threshold,
+        "saturation_threshold": saturation_threshold,
+        "blend_strength": blend_strength,
+        "target_saturation_limit": target_saturation_limit,
+        "min_blend": min_blend,
+        "affected_pixel_ratio": float(np.mean(mask)),
+    }
+
+
+def _repair_shadow_chroma(
+    hdr: np.ndarray,
+    scene_data: SceneData,
+    merge_config: dict,
+) -> tuple[np.ndarray, dict]:
+    repair_config = merge_config.get("shadow_chroma_repair", {})
+    if isinstance(repair_config, bool):
+        enabled = repair_config
+        repair_config = {}
+    else:
+        enabled = bool(repair_config.get("enabled", True))
+    if not enabled:
+        return hdr, {"enabled": False, "status": "disabled"}
+
+    y = luminance(hdr)
+    positive = y[np.isfinite(y) & (y > 0)]
+    if positive.size == 0:
+        return hdr, {"enabled": True, "status": "skipped_no_positive_luminance"}
+
+    percentile = float(repair_config.get("luminance_percentile", 2.0))
+    saturation_threshold = float(repair_config.get("saturation_threshold", 0.55))
+    blend_strength = float(repair_config.get("blend_strength", 0.45))
+    target_saturation_limit = float(repair_config.get("target_saturation_limit", 0.35))
+    low = float(repair_config.get("linear_weight_low", 0.01))
+    high = float(repair_config.get("linear_weight_high", 0.98))
+
+    threshold = float(np.percentile(positive, np.clip(percentile, 0.0, 100.0)))
+    candidate = (y > 1e-8) & (y <= threshold)
+    mask = np.zeros(y.shape, dtype=bool)
+    shadow_y, shadow_x = np.nonzero(candidate)
+    if shadow_y.size:
+        shadow_saturation = _rgb_saturation(hdr[shadow_y, shadow_x])
+        selected = shadow_saturation >= saturation_threshold
+        mask[shadow_y[selected], shadow_x[selected]] = True
+    if not np.any(mask):
+        return hdr, {
+            "enabled": True,
+            "status": "skipped_no_shadow_chroma_outliers",
+            "luminance_percentile": percentile,
+            "luminance_threshold": threshold,
+            "saturation_threshold": saturation_threshold,
+        }
+
+    reference = _best_linear_reference_radiance_for_mask(scene_data, mask, low, high)
+    reference_y = luminance(reference)
+    y_mask = y[mask]
+    repaired = y_mask[:, None] * reference / np.maximum(reference_y[:, None], 1e-8)
+    invalid_reference = reference_y <= 1e-8
+    if np.any(invalid_reference):
+        repaired[invalid_reference] = y_mask[invalid_reference, None]
+    repaired = _limit_highlight_saturation(repaired, y_mask, target_saturation_limit)
+
+    darkness = 1.0 - np.clip(y_mask / max(threshold, 1e-8), 0.0, 1.0)
+    alpha = blend_strength * darkness
+    output = hdr.copy()
+    output[mask] = hdr[mask] * (1.0 - alpha[:, None]) + repaired * alpha[:, None]
+    return np.maximum(output, 0.0).astype(np.float32), {
+        "enabled": True,
+        "status": "applied",
+        "luminance_percentile": percentile,
+        "luminance_threshold": threshold,
+        "saturation_threshold": saturation_threshold,
+        "blend_strength": blend_strength,
+        "target_saturation_limit": target_saturation_limit,
+        "affected_pixel_ratio": float(np.mean(mask)),
+    }
+
+
+def _best_linear_reference_radiance_for_mask(
+    scene_data: SceneData,
+    mask: np.ndarray,
+    low: float,
+    high: float,
+) -> np.ndarray:
+    y_indices, x_indices = np.nonzero(mask)
+    best_weight = np.zeros(y_indices.shape[0], dtype=np.float32)
+    best_rgb = np.zeros((y_indices.shape[0], 3), dtype=np.float32)
+    for frame, exposure_time in zip(scene_data.frames, scene_data.exposure_times):
+        image = sanitize_float_image(frame.linear_rgb)
+        pixels = image[y_indices, x_indices]
+        lum = luminance(pixels)
+        weight = triangular_weights(lum, low, high)
+        update = weight > best_weight
+        if np.any(update):
+            radiance = pixels / max(float(exposure_time), 1e-12)
+            best_rgb[update] = radiance[update]
+            best_weight[update] = weight[update]
+    return best_rgb
+
+
+def _rgb_saturation(rgb: np.ndarray) -> np.ndarray:
+    max_channel = np.max(rgb, axis=-1)
+    min_channel = np.min(rgb, axis=-1)
+    return (max_channel - min_channel) / np.maximum(max_channel, 1e-8)
+
+
+def _limit_highlight_saturation(rgb: np.ndarray, y: np.ndarray, saturation_limit: float) -> np.ndarray:
+    saturation = _rgb_saturation(rgb)
+    neutral = np.repeat(y[..., None], 3, axis=-1)
+    excess = np.clip((saturation - saturation_limit) / max(1.0 - saturation_limit, 1e-8), 0.0, 1.0)
+    return rgb * (1.0 - excess[..., None]) + neutral * excess[..., None]
 
 
 def _demosaic_bilinear_float(

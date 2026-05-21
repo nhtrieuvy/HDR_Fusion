@@ -4,6 +4,7 @@ import argparse
 import sys
 import traceback
 from pathlib import Path
+from time import perf_counter
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -57,7 +58,12 @@ def main() -> int:
     for scene_input in tqdm(scene_inputs, desc="Scenes"):
         logger.info("Processing scene %s", scene_input.name)
         try:
+            scene_start = perf_counter()
+            load_start = perf_counter()
             frames = processor.load_scene_frames(scene_input.files, scene_input.exposure_overrides)
+            load_seconds = perf_counter() - load_start
+
+            validation_start = perf_counter()
             scene_data = build_scene_data(
                 scene_input.name,
                 scene_input.folder,
@@ -66,6 +72,8 @@ def main() -> int:
                 scene_input.errors,
                 config,
             )
+            scene_data.processing_info["raw_load_seconds"] = load_seconds
+            scene_data.processing_info["validation_seconds"] = perf_counter() - validation_start
 
             if scene_data.errors:
                 logger.error("Scene %s failed validation: %s", scene_data.name, "; ".join(scene_data.errors))
@@ -74,9 +82,15 @@ def main() -> int:
                     return 1
                 continue
 
+            alignment_start = perf_counter()
             scene_data = align_scene(scene_data, config)
+            scene_data.processing_info["alignment_seconds"] = perf_counter() - alignment_start
             if config.get("debug", {}).get("save_intermediate_preview", True):
+                debug_start = perf_counter()
                 write_intermediate_previews(output_root, scene_data)
+                scene_data.processing_info["intermediate_preview_seconds"] = perf_counter() - debug_start
+            else:
+                scene_data.processing_info["intermediate_preview_seconds"] = 0.0
             results: list[HDRResult] = []
             previews = {}
 
@@ -103,7 +117,12 @@ def main() -> int:
                     previews[result.algorithm_name] = result.preview_png
 
             if config.get("debug", {}).get("save_contact_sheet", True):
+                contact_start = perf_counter()
                 create_contact_sheet(previews, output_root / scene_data.name / "comparison_contact_sheet.png")
+                scene_data.processing_info["contact_sheet_seconds"] = perf_counter() - contact_start
+            else:
+                scene_data.processing_info["contact_sheet_seconds"] = 0.0
+            scene_data.processing_info["total_scene_seconds"] = perf_counter() - scene_start
             write_scene_summary(output_root, scene_data, results)
         except Exception as exc:
             logger.error("Scene %s failed unexpectedly: %s", scene_input.name, exc)
