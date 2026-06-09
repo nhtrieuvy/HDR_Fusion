@@ -1,0 +1,48 @@
+name: bright_interior
+version: 1.0.0
+input:
+  min_frames: 3
+  max_frames: 7
+raw:
+  no_auto_bright: true
+  gamma: [1.0, 1.0]
+hdr:
+  exposure_ratio_low_threshold: 0.018
+  exposure_ratio_high_threshold: 0.90
+  source_mask_strictness: 0.80
+  raw_merge_low_threshold: 0.016
+  raw_merge_high_threshold: 0.94
+  source_compositor_strength: 0.86
+  source_feather_sigma: 2.1
+  window_compositor_strength: 0.96
+  window_feather_sigma: 1.35
+  window_detail_min_std: 0.017
+  window_detail_min_fraction: 0.025
+radiance_safety:
+  amaze_input_percentile: 99.9
+  amaze_input_white: 0.84
+  shoulder_strength: 0.55
+  source_ceiling_ratio: 0.90
+finishing:
+  deglare_strength: 0.16
+  debloom_strength: 0.18
+  saturation_freshness: 1.12
+  shadow_lift: 0.06
+  sharpening: 0.18
+  final_p99_target: 0.90
+  neutral_balance_strength: 0.22
+  neutral_balance_max_gain: 1.10
+  highlight_chroma_strength: 0.18
+  highlight_source_chroma_strength: 0.54
+  shadow_chroma_strength: 0.12
+color_grade:
+  vibrance_strength: 0.24
+  wood_warmth_strength: 0.065
+  clarity_strength: 0.075
+  source_protection: 0.95
+  neutral_protection: 0.70
+qc:
+  max_technical_clip_percentage: 1.0
+  max_halo_score: 0.08
+export:
+  jpeg_quality: 92
