@@ -54,6 +54,10 @@ class Settings(BaseModel):
     max_raw_job_concurrency: int = 1
     auto_create_db: bool = False
     cors_origins: list[str] = Field(default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"])
+    demosaic_backend: Literal["opencv_edge_aware", "external_amaze_service"] = "opencv_edge_aware"
+    amaze_service_url: str | None = None
+    amaze_timeout_seconds: float = 180.0
+    amaze_allow_fallback: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -84,6 +88,10 @@ class Settings(BaseModel):
             direct_upload_max_bytes=int(os.getenv("DIRECT_UPLOAD_MAX_BYTES", "2000000000")),
             max_raw_job_concurrency=int(os.getenv("MAX_RAW_JOB_CONCURRENCY", "1")),
             auto_create_db=_env_bool("AUTO_CREATE_DB", False),
+            demosaic_backend=os.getenv("DEMOSAIC_BACKEND", "opencv_edge_aware"),
+            amaze_service_url=_env_optional("AMAZE_SERVICE_URL"),
+            amaze_timeout_seconds=float(os.getenv("AMAZE_TIMEOUT_SECONDS", "180")),
+            amaze_allow_fallback=_env_bool("AMAZE_ALLOW_FALLBACK", True),
             cors_origins=[
                 item.strip()
                 for item in os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
@@ -97,6 +105,14 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_optional(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 settings = Settings.from_env()

@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    rawtherapee \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt PiDNG
+COPY amaze_service /app/amaze_service
+COPY native /app/native
+CMD ["uvicorn", "amaze_service.main:app", "--host", "0.0.0.0", "--port", "8077"]

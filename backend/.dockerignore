@@ -1,4 +1,5 @@
 .venv/
+.venv-amaze-service/
 .pytest_cache/
 .scratch/
 .local_storage/

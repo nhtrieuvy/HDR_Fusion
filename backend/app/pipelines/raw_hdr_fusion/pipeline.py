@@ -302,6 +302,10 @@ class RawHDRFusionPipeline:
             raw_channel_labels=raw_channel_labels,
             camera_wb=camera_wb,
             color_desc=color_desc,
+            demosaic_backend=settings.demosaic_backend,
+            amaze_service_url=settings.amaze_service_url,
+            amaze_timeout_seconds=settings.amaze_timeout_seconds,
+            amaze_allow_fallback=settings.amaze_allow_fallback,
         )
         complete_step(self.db, safety_step, metrics={**safety.metrics, **demosaic.metrics}, artifacts=safety_artifacts)
         update_job_progress(self.db, job, PROGRESS["amaze_complete"])

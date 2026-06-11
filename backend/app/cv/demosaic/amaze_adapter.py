@@ -7,6 +7,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from app.cv.demosaic.external_amaze_service import ExternalAmazeServiceError, demosaic_with_external_amaze_service
+
 
 @dataclass
 class DemosaicResult:
@@ -22,6 +24,10 @@ def demosaic_amaze_or_fallback(
     raw_channel_labels: tuple[str, ...] | None = None,
     camera_wb: list[float] | tuple[float, ...] | None = None,
     color_desc: str | None = None,
+    demosaic_backend: str = "opencv_edge_aware",
+    amaze_service_url: str | None = None,
+    amaze_timeout_seconds: float = 180.0,
+    amaze_allow_fallback: bool = True,
 ) -> DemosaicResult:
     if mosaic.ndim == 3:
         labels = raw_channel_labels or cfa_pattern
@@ -33,6 +39,7 @@ def demosaic_amaze_or_fallback(
                 "demosaic_method": "multichannel_raw_to_linear_rgb",
                 "requested_demosaic_method": "AMAZE",
                 "amaze_fallback_reason": "input_is_multichannel_linear_dng_not_bayer_mosaic",
+                "configured_demosaic_backend": demosaic_backend,
                 "linear_raw_channel_count": int(mosaic.shape[-1]),
                 **channel_metrics,
                 **wb_metrics,
@@ -40,14 +47,40 @@ def demosaic_amaze_or_fallback(
         )
         return DemosaicResult(rgb.astype(np.float32), "multichannel_raw_to_linear_rgb", metrics)
 
-    # Real AMaZE through LibRaw is file-based. For merged synthetic mosaic we use a strict adapter
-    # with explicit fallback reason instead of silently claiming AMaZE.
+    fallback_reason: str | None = None
+    backend = demosaic_backend.strip().lower()
+    if backend == "external_amaze_service":
+        try:
+            result = demosaic_with_external_amaze_service(
+                mosaic,
+                service_url=amaze_service_url,
+                timeout_seconds=amaze_timeout_seconds,
+                cfa_pattern=cfa_pattern,
+                camera_wb=camera_wb,
+                color_desc=color_desc,
+            )
+            metrics = _linear_rgb_metrics(result.rgb, result.metrics)
+            return DemosaicResult(result.rgb.astype(np.float32), "external_amaze_service", metrics)
+        except ExternalAmazeServiceError as exc:
+            fallback_reason = str(exc)
+            if not amaze_allow_fallback:
+                raise RuntimeError(f"external AMaZE demosaic failed and fallback is disabled: {exc}") from exc
+    elif backend != "opencv_edge_aware":
+        fallback_reason = f"unknown_demosaic_backend:{demosaic_backend}"
+        if not amaze_allow_fallback:
+            raise RuntimeError(f"unknown demosaic backend and fallback is disabled: {demosaic_backend}")
+
     rgb = demosaic_bayer_opencv(mosaic, cfa_pattern)
     rgb, wb_metrics = apply_camera_white_balance_rgb(rgb, camera_wb, color_desc)
+    if fallback_reason is None:
+        fallback_reason = "configured_opencv_edge_aware_backend"
     metrics = _linear_rgb_metrics(rgb, {
         "demosaic_method": "opencv_edge_aware_fallback",
         "requested_demosaic_method": "AMAZE",
-        "amaze_fallback_reason": "merged_raw_mosaic_array_requires_external_amaze_bridge",
+        "configured_demosaic_backend": demosaic_backend,
+        "amaze_backend": "opencv_edge_aware",
+        "amaze_fallback_used": True,
+        "amaze_fallback_reason": fallback_reason,
         **wb_metrics,
     })
     return DemosaicResult(rgb.astype(np.float32), "opencv_edge_aware_fallback", metrics)

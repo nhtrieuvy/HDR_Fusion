@@ -6,6 +6,7 @@ backend/.mypy_cache/
 backend/.ruff_cache/
 backend/.scratch/
 backend/.local_storage/
+backend/.venv-amaze-service/
 backend/_build/
 backend/hdr_reconstruction/input/
 backend/hdr_reconstruction/output/

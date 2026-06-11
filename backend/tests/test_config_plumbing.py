@@ -1,4 +1,5 @@
 from app.pipelines.raw_hdr_fusion.config import config_from_snapshot
+from app.core.config import Settings
 
 
 def test_config_from_snapshot_reads_finishing_source_and_color_grade():
@@ -44,3 +45,17 @@ def test_config_from_snapshot_reads_finishing_source_and_color_grade():
     assert config.color_vibrance_strength == 0.26
     assert config.color_wood_warmth_strength == 0.08
     assert config.color_source_protection == 0.97
+
+
+def test_settings_reads_demosaic_backend_env(monkeypatch):
+    monkeypatch.setenv("DEMOSAIC_BACKEND", "external_amaze_service")
+    monkeypatch.setenv("AMAZE_SERVICE_URL", "http://127.0.0.1:8077")
+    monkeypatch.setenv("AMAZE_TIMEOUT_SECONDS", "99")
+    monkeypatch.setenv("AMAZE_ALLOW_FALLBACK", "false")
+
+    settings = Settings.from_env()
+
+    assert settings.demosaic_backend == "external_amaze_service"
+    assert settings.amaze_service_url == "http://127.0.0.1:8077"
+    assert settings.amaze_timeout_seconds == 99
+    assert settings.amaze_allow_fallback is False
